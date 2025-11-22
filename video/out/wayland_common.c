@@ -2146,13 +2146,33 @@ static void info_done(void *data, struct wp_image_description_info_v1 *image_des
     struct vo_wayland_state *wl = wd->wl;
     wp_image_description_info_v1_destroy(image_description_info);
     if (!wd->icc_file) {
-        wl->preferred_csp = wd->csp;
         MP_VERBOSE(wl, "Preferred surface feedback received:\n");
         log_color_space(wl->log, wd);
-        if (wd->csp.hdr.max_luma > wd->ref_luma) {
+        if (fabsf(wd->csp.hdr.max_luma / wd->ref_luma - 1.0f) > 1e-4f &&
+            !pl_color_transfer_is_hdr(wd->csp.transfer)) {
             MP_VERBOSE(wl, "Setting preferred transfer to PQ for HDR output.\n");
-            wl->preferred_csp.transfer = PL_COLOR_TRC_PQ;
+            wd->csp.transfer = PL_COLOR_TRC_PQ;
         }
+        // Wayland luminances are always in reference to the reference luminance. That is,
+        // if max_luma == 2*ref_luma, then there is 2x headroom above paper white. On the
+        // other hand, libplacebo hardcodes PL_COLOR_SDR_WHITE as the reference luminance.
+        // We must scale all wayland values to correspond to the libplacebo scale,
+        // otherwise libplacebo will assume that there is too little or too much headroom
+        // when ref_luma != PL_COLOR_SDR_WHITE.
+        float a = wd->min_luma;
+        float c = 0.0f;
+        if (!pl_color_transfer_is_hdr(wd->csp.transfer))
+            c = PL_COLOR_SDR_WHITE / PL_COLOR_SDR_CONTRAST;
+        float b = (PL_COLOR_SDR_WHITE - c) / (wd->ref_luma - a);
+        wd->csp.hdr.min_luma = (wd->csp.hdr.min_luma - a) * b + c;
+        wd->csp.hdr.max_luma = (wd->csp.hdr.max_luma - a) * b + c;
+        if (wd->csp.hdr.max_cll != 0)
+            wd->csp.hdr.max_cll  = (wd->csp.hdr.max_cll  - a) * b + c;
+        if (wd->csp.hdr.max_fall != 0)
+            wd->csp.hdr.max_fall = (wd->csp.hdr.max_fall - a) * b + c;
+        // Ensure that min_luma doesn't become negative.
+        wd->csp.hdr.min_luma = MPMAX(wd->csp.hdr.min_luma, 0.0);
+        wl->preferred_csp = wd->csp;
     } else {
         if (wl->icc_size) {
             munmap(wl->icc_file, wl->icc_size);
